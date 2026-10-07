@@ -3,44 +3,57 @@ FPGA clock domain crossing examples using a DE0Nano board (Altera Cyclone IV), Q
 
 Provided codes are related to clock domains and how to cross them without data loss.
 
-We will not need any hardware for these exercises but use only tb-s to showcase them.
+We will not need hardware for these exercises. We will use only tb-s to showcase them instead.
 
 ## General description
-Let’s follow up on the repo from before and get into more complex concepts, shall we? More precisely, we have to talk about a very important concept in FPGAs and one of the main source of all misery: clock domains.
+Let’s follow up on the repo from before and get into more complex things, shall we? More precisely, we have to talk about a very important concept in FPGAs and one of the main source of all misery and issues: clock domains.
 
 ### Clock domain crossing
-We usually generate all clocks from the same general source (here, the 50 MHz external crystal) which should mean that all clocks are in synch. This isn’t always the case though due to how we may set the clocks up (we can add a phase delay on PLLs, for instance) or because we actually have two asynch clocks driving or the same design (two physical crystals, for example). Of note, an external physical action/trigger – say, a button pushed by a user - is ALWAYS asynchronous to the FPGA, which will lead to the introduction of a new clock domain for the “always” block that will be executed on that external trigger. This is probably the most common way to encounter a different clock domain in early project.
+We usually generate all clocks from the same general source (here, the 50 MHz external crystal) which should mean that all clocks are in synch. This isn’t always the case though due to how we may set the clocks up (we can add a phase delay on PLLs, for instance) or due to actually having two asynch clocks driving the design (two separate physical crystals, for example). Of note, an external physical action/trigger – say, a button being pushed by a user - is ALWAYS asynchronous to the FPGA, which will lead to the introduction of a new "clock domain" (the “always” block will be executed on the external trigger, not on the clock). An external trigger is probably the most common way to encounter an asynch clock domain in early projects.
 
-What does a different clock domain main from a practical sense? Well, it means that sampling of a signal will not occur the same time as the change on the signal, potentially breaking setup-hold times and introducing metastability (example: if we have a signal that changes every 6 ns with a setup-hold time of 3 ns, then a 2 ns sampling trigger will generate a metastable/glitched value on the first trigger and only provide the right output on the second and the third one.) The issue becomes even more severe if the trigger becomes asynchronous to the original clock signal, practically meaning that ALL samplings may become metastable.
+What does a separate clock domain (relative to the FPGA's own clock) mean from a practical sense? Well, it means that sampling of a signal (done by the second clock) will not likely occur the same time as the change on the signal (done by the first clock), potentially breaking setup-hold times and introducing metastability (example: if we have a signal that changes every 6 ns with a setup-hold time of 3 ns, then a 2 ns sampling trigger will generate a metastable/glitched value of the first trigger and only provide the right output on the second and the third triggers). The issue becomes even more severe if the trigger becomes asynchronous to the original clock signal, practically meaning that ALL samplings may become metastable.
 
 Now, to get around this issue, we can do certain coding best practices to facilitate a safe domain crossing from one clock to the other.
 
 #### Synchronisation/signal crossing
-We have already touched upon these in the previous repo where, in order to ensure that an incoming value to a module is not metastable, we send it through a synchroniser. A synchroniser is just a small shift register, something that will store the incoming signal for one clock trigger and then provide it as an input to the module. This usually will be just an “always” block at the beginning of the module clocking on the trigger of the module and sampling the incoming signal into a 2-element register, the MSB of the register then used as the actual input for the module instead of the direct input. Mind, this will introduce a delay to the signal progression, something we often will have to compensate for somewhere else (or just be conscious of) even in cyclical executions. An example will be shared below.
+We have already touched upon these in the previous repo where, in order to ensure that an incoming value to a module is not metastable, we sent it through a synchroniser. A synchroniser is just a small shift register, something that will store the incoming signal for one clock cycle and then provide it after this cycle as the input to the module. This usually will be just an “always” block at the beginning of the module clocking on the trigger of the module and sampling the incoming signal into a 2-element shift register, the MSB of the register then used as the actual input for the module instead of the direct input. Mind, this will introduce a delay to the signal progression, something we often will have to compensate for somewhere else (or just be conscious of) even in cyclical executions. An example will be shared below.
 
 #### Flag crossing/handshake/task crossing
-To pass a flag between two different clocks – a signal that is merely one tick high in the source and on the receiving domain – some extra considerations must be followed. First and foremost, flags can be easily missed due to their short size (say, the flag is 10 ns long, but we sample the input line only every 20 ns) or can be sampled too many times, making them lose their flag nature. The solution is to turn any flag into a level change in the source domain before passing it to the receiving domain. It is also a good idea to do something called a “handshake” where the receiving domain will send an acknowledgement back to the source to announce that it has received the flag. A more complex version of a “handshake” is a task crossing where we have an acknowledgement as well as a “task done” flag passed between the two domains.
+To pass a flag between two different clocks – a signal that is merely one tick high in the source and on the receiving domain – some extra considerations must be followed. First and foremost, flags can be easily missed due to their short size (say, the flag is 10 ns long, but we sample the input line only every 20 ns) or can be sampled too many times, making them lose their flag shape.
 
-An example for all three this will be shared below.
+The solution is to turn any flag into a level change in the source clock domain before passing it to the receiving clock domain. It is also a good idea to do something called a “handshake” where the receiving domain will send an acknowledgement back to the source to announce that it has received the flag.
+
+A more complex version of a “handshake” is a task crossing where we have an acknowledgement as well as a “task done” flag passed between the two domains.
+
+An example for all three of these transitions will be shared below.
 
 #### Data crossing (FIFO)
-Now, this is a the big one where we step away from only pushing singular bits over the domains and shift to actual data busses, something we will need extensively to interface with external hardware busses on our FPGA.
-A FIFO – or First In, First Out – element should not sound new to anyone as such “input pipeline”, but to be clear anyway, it is a memory device/data queue that will then be loaded by one of the clocks and read out with the other. The trick is that if the FIFO is full, it won’t be loaded further and if it is empty, it won’t be read out again.
+Now, this is a the big one where we step away from only pushing singular bits over the separate domains and shift to actual data busses, something we will need to use extensively to interface with external hardware busses with our FPGA.
 
-To introduce this capacity, we have two memory pointers (a write pointer and a read pointer) in a FIFO which loop around the FIFO’s memory block, writing into or reading out the element they are pointing at. Once they have done the reading/writing, they are stepped to the next memory position.
+A FIFO – or First-In, First-Out – element should not sound new to anyone, but to be clear anyway, it is a memory device/data queue that will be loaded by one of the clocks (the input/write domain) and read out with the other (the output/read domain). The trick is that if the FIFO is full, it won’t be loaded further and if it is empty, it won’t be read out again.
 
-The trick comes when the two memory pointers catch up with each other, i.e. they point to the same memory element: if the read pointer caught up with the write pointer, the FIFO is empty, if the write pointer caught up with the read pointer, the FIFO is full. We thus have to know the relative position of the two pointers and in which direction they arrive to an overlap. This directly means that the state of both memory pointers must be “known” within both the input side and the output side clock domains; the pointers will be running on two different – potentially asynchronous - clock domains since they represent the input or the output side of the FIFO. As such, a FIFO build demands a very good understanding of clock domain crossings. It also demands a highly accurate and reliable counter to be implemented, which is where Gray counters come to play.
+To construct a FIFO, we have two memory pointers (a write pointer and a read pointer) which loop around the FIFO’s memory block, writing into or reading out the element they are pointing at. Once they have done the reading/writing, they are stepped to the next memory position. The trick comes when the two memory pointers catch up with each other, i.e. they point to the same memory element: if the read pointer catches up with the write pointer, the FIFO has run empty, if the write pointer catches up with the read pointer, the FIFO is full. We thus have to know the relative position of the two pointers and in which "direction" they arrive to their overlap. This means that the state of both memory pointers must be “known” within both the input side and the output side clock domains, after all, the pointers will be running on two different – potentially asynchronous - clock domains representing the input or the output side of the FIFO.
+
+As such, a FIFO build demands a very good understanding of clock domain crossings. It also demands a highly accurate and reliable counter to be implemented, which is where Gray counters come to play.
 
 ### Gray counters
-There is a fundamental difficulty in moving the pointers on time where it may take too long for them to properly update their position using normal binary counters (remember that changing a counter’s value will not occur under just one system clock but will occur under whichever number of bits will have to physically change their state – for example, switching from 4’b0110 to 4’b0111 will be 4 times faster than stepping from 4’b0111 to 4’b1000).
+There is a fundamental difficulty in moving the pointers on time where it may take too long for them to properly update their position using normal binary counters (remember that changing a counter’s value will not occur under just one system/FPGA clock but will occur under whichever number of bits will have to physically change – for example, switching from 4’b0110 to 4’b0111 will be 4 times faster than stepping from 4’b0111 to 4’b1000).
 
-A Gray counter helps with this issue by transforming any count-up or count-down step taking only one bit to change. A Gray counter will up to 4 will turn 2’b0->2’b1->2’b10->2’b11 to 2’b0->2’b1->2’b11->2’b10 instead, for instance.
+A Gray counter helps with this issue by transforming any count-up or count-down step taking only one bit to change. A Gray counterup to 4 will turn
 
-A Gray code is particularly useful when sending counting data over two clock domains since it will have an uncertainty of only 1 bit and would need to synchronise only one value when the count is passing the clock domains. FIFOs thus often use Gray counters to increase reliability. Mind, it is perfectly possible to use binary counters in FIFOs instead, though the handshake mechanisms to pass these counters between clock domains will be significantly more complex, introducing latency in an otherwise critical and highly timing-sensitive element.
+2’b0->2’b1->2’b10->2’b11
 
-The only thing to keep in our heads is that a standard Gray counter is always a 2-factor sized counter, it cannot be anything different due to the natural symmetry (reflection) of its design.
+to
 
-The conversion code to go from binary counter to Gray counter is pretty simple, and I am not sharing a separate code on it. There will be a few within the FIFO code anyway (see the two pointer definition Verilog files instead).
+2’b0->2’b1->2’b11->2’b10
+
+instead, for instance.
+
+A Gray code is particularly useful when sending counting data over two clock domains since it will have an uncertainty of only 1 bit and would need to synchronise only one value when the count is passing the clock domains, making it a lot faster. FIFOs thus often use Gray counters to assign position data to their write/read pointers. (Mind, it is perfectly possible to use binary counters in FIFOs instead, though the handshake mechanisms to pass these counters between clock domains will be significantly more complex, introducing latency in an otherwise critical and highly timing-sensitive element.)
+
+The only thing to keep in our minds is that a standard Gray counter is always a 2-factor sized counter, it cannot be anything different due to the natural symmetry (reflection) of its design. This limits the number of FIFO elements to factors of 2.
+
+The conversion code to go from binary counter to Gray counter is pretty simple, and I am not sharing it. There will be a few within the FIFO code anyway (see the two pointer definition Verilog files instead).
 
 ### FPGA Block RAMs
 We need to mention block rams too.
